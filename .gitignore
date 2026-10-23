@@ -1,0 +1,12 @@
+# 私钥 / 公钥（防止误传签名私钥）
+*.pem
+
+# 授权文件产物
+*.lic
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 本地配置（可能含 PAT）
+config.json
