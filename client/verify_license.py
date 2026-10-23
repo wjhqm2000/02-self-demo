@@ -62,6 +62,24 @@ def canonical_json(payload: Dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def canonical_json_clumsy(payload: Dict[str, Any]) -> bytes:
+    """CLUMSY C++ client compatible canonical JSON.
+
+    The CLUMSY mini_json serializer (src/license/ext/mini_json.h) emits
+    raw UTF-8 bytes for any codepoint >= 0x20 (only control chars < 0x20
+    are escaped as \\uXXXX).  To produce byte-identical output we MUST
+    use ensure_ascii=False so non-ASCII chars are emitted as raw UTF-8
+    instead of \\uXXXX escapes.
+
+    All other rules match canonical_json: compact separators, sorted keys,
+    no NaN/Infinity.
+    """
+    return json.dumps(
+        payload, separators=(",", ":"), sort_keys=True,
+        ensure_ascii=False, allow_nan=False,
+    ).encode("utf-8")
+
+
 def hash_sensitive(value: str) -> str:
     """SHA-256 hex digest of a privacy-sensitive claim.
 
