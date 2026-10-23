@@ -58,7 +58,7 @@ DEFAULT_CONFIG_PATH = Path.home() / ".self-demo" / "config.json"
 # 注意：这只是挡住"拿到 PAT 就随便刷授权"的路人，不防定向逆向。
 # 部署时请改成你自己的随机值，并同步配置到仓库 Secrets。
 # ---------------------------------------------------------------------------
-DEMO_HMAC_SECRET = "change-me-self-demo-hmac-v1"
+DEMO_HMAC_SECRET = "k9sdfj239asdf"
 
 
 def _compute_auth(hw_fp: str, key: str, customer: str, tier: str) -> str:
