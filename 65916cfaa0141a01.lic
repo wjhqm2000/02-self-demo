@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "algorithm": "RSA-PSS-SHA256",
+  "payload": {
+    "app_id": "self-demo",
+    "hw_fingerprint": "65916cfaa0141a01fad346a564729d7e55240b1543b5c32948ed2a60a479a3d7",
+    "customer_id": "4b35211719dd30751a98ea35f5929161b3ea2cf5ba2cdbceadb7177ce5078d96",
+    "tier": "basic",
+    "issued_at": "2026-10-23T11:20:46Z",
+    "expires_at": null,
+    "features": {},
+    "nonce": "EaC7dREi8NiSFS25d9oxcQ"
+  },
+  "signature": "MtBPEOOW9eCooYyMlwZYV3D5vU4nYZ2DZFx0539P0TL9v+esGICSGVHztacPHatUtwgeVEPllyrXWvjNXc5m3JzLBqulVQXhq4w4nZTy7QEfcrR1oMKZrMbfOn0k/cGIHueEki6z7xV98CZBgHjixEFHA42XK1o6yLk7OE8taMenOvsoJmO9bPbtHEBajctia/vHgOYVH17HXaP/B4naS5UUPAY9AZhUIZEInsobDSTl568vUNhEIOI6cfkazetVs1FMSR+1NEpm0MEiz94OwAshRDhSyn+jlnojQ1bYACBpiycoBy3UmaPdLi4CjENljUrC1DAbRgd1ffwgtN+U/w=="
+}
