@@ -18,7 +18,7 @@
 ├──────────────────────────────────────────────────────────────┤
 │  层次 3: GHA 内部签名                                        │
 │  Key: Secrets.RSA_PRIVATE_KEY                                 │
-│  用途: RSA-PSS-SHA256 签名                                    │
+│  用途: RSA-2048 PKCS#1 v1.5 + SHA-256 签发 LICB V2            │
 │  泄露影响: 签名权落入攻击者手中 → 但 GitHub Secrets 是加密存储的   │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -39,30 +39,24 @@
 └── README.md
 ```
 
-## Payload 结构
+## 授权文件结构（LICB V2）
 
-```json
-{
-  "version": 1,
-  "algorithm": "RSA-PSS-SHA256",
-  "payload": {
-    "app_id": "self-demo",
-    "hw_fingerprint": "<sha256(原始指纹) hex — 脱敏，非明文>",
-    "customer_id": "<sha256(订单号) hex — 脱敏，非明文>",
-    "tier": "pro",
-    "issued_at": "2026-10-23T12:00:00Z",
-    "expires_at": null,
-    "features": { "unlock_all": true },
-    "nonce": "<base64url 16 bytes>"
-  },
-  "signature": "<base64 RSA-PSS signature over canonical_json(payload)>"
-}
+签发产物是**二进制**（没有 JSON envelope），格式与 `compressed migration` 的
+`license::verify_license_file_v2` 逐字节对齐：
+
+```
+"LICB" | uint16 version=2 | uint32 payload_len | uint32 sig_len=256
+       | payload(canonical JSON 原始字节) | RSA-2048 PKCS#1 v1.5(SHA-256) 签名
 ```
 
-- `expires_at: null` = 永不过期（终身离线）
-- `hw_fingerprint` 在签名覆盖范围内 → 绑定硬件，防拷贝
-- 文件名 = `sha256(hw_fingerprint)[:16].lic`（防隐私泄露）
-- 签名算法：**RSA-PSS + MGF1(SHA256) + salt=MAX_LENGTH + SHA256**
+payload 字段：`v` / `mid` / `card` / `iat` / `eat` / `perm` / `thr` / `bl`。
+`eat` 由卡类型决定（永久卡 `eat=0 & perm=true`，天卡/分钟卡按剩余时间换算），
+**不存在"默认终身"分支**。完整字段表、`eat` 规则与字节规格见文末
+「卡密通验卡 + LICB V2 按天数签发」一节。
+
+- `mid` 在签名覆盖范围内 → 绑定硬件，防拷贝
+- 文件名 = `sha256(mid)[:16].lic`（防隐私泄露）
+- 签名算法：**RSA-2048 + PKCS#1 v1.5 + SHA-256**（`padding.PKCS1v15()`）
 - 签名原文：`canonical_json(payload)` = key-sorted, no-whitespace JSON bytes
 
 ## 本地测试（不需要 GitHub，10 分钟跑通）
@@ -77,36 +71,54 @@ openssl genrsa -out private.pem 2048
 openssl rsa -in private.pem -pubout -out public.pem
 ```
 
-### 步骤 2: 模拟签名（本地跑 GHA 会跑的那份代码）
+### 步骤 2: 准备 client_payload 并签名（本地跑 GHA 会跑的那份代码）
 
 ```bash
 python -m issuer.sign_license \
     --private-key private.pem \
-    --hw-fp "DESKTOP-TEST:MAC0011223344:CPUi7" \
-    --key "a7f3b92e4c1d8a6f" \
-    --customer "order-local-test" \
-    --tier pro
+    --payload-file payload.json \
+    --out a7f3b92e4c1d8a6f.lic
 ```
 
-会生成 `a7f3b92e4c1d8a6f.lic`。
+`payload.json` 示例（字段含义见文末）：
 
-### 步骤 3: 本地验签
+```json
+{
+  "mid": "<64 位小写 HEX 机器码>",
+  "card_type": "day",
+  "remaining_days": 15,
+  "remaining_minutes": 21600,
+  "hw_snapshot": {
+    "disk": "0025_38E3_31C4_4AC0.",
+    "board": "/32WL5Y3/CNFCW0034O00DD/",
+    "mac": "CC96E529566C",
+    "cpu": "GenuineIntel_13th Gen Intel(R) Core(TM) i5-13400_2c6f2",
+    "uuid": "4C4C4544-0032-5710-804C-B3C04F355933"
+  },
+  "card_id": "be94202be69c570d",
+  "key": "a7f3b92e4c1d8a6f"
+}
+```
+
+会生成 **LICB V2 二进制** `a7f3b92e4c1d8a6f.lic`（14 字节头 + payload + 256 字节签名）。
+
+### 步骤 3: 本地验签（用 C++ 侧同一实现）
 
 ```bash
-python -m client.verify_license \
-    --license a7f3b92e4c1d8a6f.lic \
-    --public-key public.pem \
-    --app-id self-demo \
-    --hw-fp "DESKTOP-TEST:MAC0011223344:CPUi7"
-# → OK   : valid license for app 'self-demo'
+# public.pem → DER（C++ 侧只读 DER）
+python -c "from cryptography.hazmat.primitives import serialization as s; open('public.der','wb').write(s.load_pem_public_key(open('public.pem','rb').read()).public_bytes(s.Encoding.DER, s.PublicFormat.SubjectPublicKeyInfo))"
+
+../compressed\ migration/src/test/test_licb_rsa.exe --verify a7f3b92e4c1d8a6f.lic public.der
+# → STATUS=OK ... SCORE=100 PASS=1 RESULT=PASS
 ```
 
 ### 步骤 4: 故意破坏，看验签失败
 
 ```bash
-# 改一下 .lic 里的 signature 字段 → 验签失败
-# 改一下 hw_fingerprint → 验签失败
-# 改一下 expires_at 为过去日期 → 过期失败
+# payload 任一字节改动 → STATUS=SIGNATURE_INVALID
+# 用 PSS 代替 PKCS#1 v1.5 签名 → STATUS=SIGNATURE_INVALID
+# mid 换成别的机器 → STATUS=MID_MISMATCH
+# eat 改成过去时间 → STATUS=EXPIRED
 ```
 
 ### 步骤 5: 完整两阶段激活流程（本地模拟）
@@ -193,7 +205,8 @@ mkdir -p ~/.self-demo
     "repo_name": "license-signer",
     "public_key_path": "C:/Users/你/路径到public_prod.pem",
     "customer_id": "order-20261023-001",
-    "tier": "pro"
+    "tier": "pro",
+    "card_code": "你的卡密"
 }
 ```
 
@@ -206,11 +219,15 @@ python -m client.trigger_and_fetch
 预期输出：
 
 ```
-hw_fingerprint: DESKTOP-XXX-abc123def456
+device mid     : <64 位 HEX>
 filename key   : abc123def4567890
+hw snapshot    : {"board":...,"cpu":...,"disk":...,"mac":...,"uuid":...}
 customer       : order-20261023-001
 tier           : pro
 
+[step 2] 卡密通验卡...
+  验卡通过 ✓  card_type=day  剩余 15 天
+  remaining_days=15 remaining_minutes=21600
 [phase 1] triggering GitHub Actions workflow...
   dispatch accepted by GitHub. Polling run status...
   phase 1: waiting for GHA run #123456789 to finish (timeout 180s)...
@@ -256,18 +273,18 @@ python -m client.verify_license --public-key public_prod.pem
 pip install cryptography requests
 ```
 
-- `cryptography` — RSA-PSS 签名/验签
+- `cryptography` — RSA-2048 PKCS#1 v1.5 签名/验签
 - `requests` — GitHub API 调用 + raw URL 下载
 
 ## 借鉴来源
 
 | 组件 | 来源项目 |
 |------|---------|
-| canonical_json + RSA-PSS 签名/验签 | [Arnas-Verify](https://github.com/) |
-| envelope 结构 (version/algorithm/payload/signature) | Arnas-Verify |
+| canonical_json + RSA 签名/验签 | [Arnas-Verify](https://github.com/) + compressed migration |
+| LICB V2 二进制容器 + PKCS#1 v1.5 验签 | compressed migration（DELIVERABLE §15） |
 | 验证顺序（加密优先） | Arnas-Verify + licensing-1.0.0 token-format §7 |
-| hw_fingerprint 硬件绑定 | Haptique |
-| expires_at=null 永不过期 | tera-pilot |
+| mid / bl 硬件绑定 + 硬件评分 | compressed migration（fingerprint / license_score） |
+| `eat=0 + perm=true` 永久表示 | compressed migration（LICB payload 字段表） |
 | raw.githubusercontent.com 免 Token 下载 | Haptique 架构改进 |
 | SHA-256 哈希化文件名 | 本次安全修正 |
 
@@ -276,7 +293,7 @@ pip install cryptography requests
 1. **PAT 可以触发 repository_dispatch 并读公开 raw 文件** — scope 只勾 `public_repo`，泄露也无害
 2. **GITHUB_TOKEN 是临时 token** — 用户拿不到，安全
 3. **RSA_PRIVATE_KEY 存储在 GitHub Secrets** — 加密，但 GitHub 员工理论上能访问；对于个人开发者 Demo 足够
-4. **无撤销机制** — 泄露的 license 直到过期都有效（我们设成永不过期），与 tera-pilot 相同选择
+4. **无撤销机制** — 泄露的 license 在有效期内都有效（永久卡无到期日），与 tera-pilot 相同选择
 5. **客户端本地时钟被篡改** — 过期检查绕过风险（同所有离线授权方案）
 6. **客户端二进制被反编译替换验签逻辑** — 签名保护不能完全防逆向
 
@@ -299,3 +316,107 @@ pip install cryptography requests
 **Issue: GHA Git push 多次重试失败**
 - 看 push 步骤的详细日志
 - 如果是 rebase conflict，检查 license-result 分支历史
+
+---
+
+## 卡密通验卡 + LICB V2 按天数签发（2026-10-24 增量）
+
+上面「授权文件结构（LICB V2）」之前的历史版本（JSON envelope + PSS）**已废弃**：
+现在签发产物是 C++ 客户端可直接验证的 **LICB V2 二进制**，签名算法改为
+**RSA-2048 PKCS#1 v1.5 + SHA-256**（`padding.PKCS1v15()`，不再用 PSS）。
+
+### 新产品流程
+
+```
+config.json(card_code + 本机硬件)
+  → 采集 5 项硬件快照 → mid
+  → 卡密通验卡（GET check.php，MD5 响应签名 + 120s 时间戳容差）
+       ↓ 失败：打印原因并中止，绝不触发 GitHub（fail-closed）
+  → repository_dispatch 上送 client_payload（含 HMAC auth）
+  → GHA 校验 HMAC → 按 card_type 计算 eat → 签 LICB V2
+  → callback 拉取 .lic（二进制）→ 客户端本地验签 → 原样落盘
+```
+
+### config.json 新增必填项
+
+```json
+{
+    "github_pat": "ghp_xxxxxxxxxxxxxxxxxxxx",
+    "repo_owner": "你的GitHub用户名",
+    "repo_name": "license-signer",
+    "public_key_path": "C:/Users/你/路径到public_prod.der",
+    "customer_id": "order-20261023-001",
+    "tier": "pro",
+    "card_code": "你的卡密"
+}
+```
+
+| 键 | 说明 |
+|---|---|
+| `card_code` | **必填**。卡密通卡密，仅用于本地验卡；不会原样上送 GitHub（上送的是 `sha256(card_code)[:16]`） |
+| `public_key_path` | 建议改成 DER 格式（`.der`），与 C++ 侧 `verify_license_file_v2` 同源；PEM 也兼容 |
+
+### client_payload 字段（客户端 → GHA）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `mid` | string | 64 位小写 HEX 机器码 = `sha256("D:...|B:...|M:...|C:...|U:...")` |
+| `card_type` | string | `permanent` / `day` / `minute` / `bypass` |
+| `remaining_days` | int | 天卡剩余天数（`card_type=day` 时必须为正整数） |
+| `remaining_minutes` | int | 剩余总分钟（`card_type=minute` 时必须为正整数） |
+| `hw_snapshot` | object | `{disk, board, mac, cpu, uuid}`，缺失值为 `"NAN"`，与 C++ 基线同格式 |
+| `card_id` | string | `sha256(card_code)[:16]`，写入 V2 payload 的 `card` 字段 |
+| `key` | string | `sha256(mid)[:16]`，作为 `.lic` 文件名 |
+| `customer_id` / `tier` | string | 仅用于日志与运营记录，不进入 V2 payload |
+| `auth` | string | `HMAC-SHA256(DEMO_HMAC_SECRET, canonical_json(除 auth 外全部字段))` |
+
+`auth` 覆盖**全部业务字段**（旧版只覆盖 4 个字段），任何字段被改都会导致 GHA 拒签。
+
+### eat 计算规则（服务端，无任何写死天数）
+
+| card_type | eat | perm |
+|---|---|---|
+| `permanent` | `0` | `true` |
+| `day` | `iat + remaining_days * 86400` | `false` |
+| `minute` | `iat + remaining_minutes * 60` | `false` |
+| `bypass` | `iat + 3 * 86400`（宽限） | `false` |
+
+`sign_license.py` 对 payload 做严格 schema 校验：`card_type` 必须是上述四值之一，
+`day` 必须带正整数 `remaining_days`，`minute` 必须带正整数 `remaining_minutes`，
+`hw_snapshot` 必须恰好包含 5 个非空字符串字段。**缺字段或类型不符直接拒签，
+绝不默认按终身处理。**
+
+### LICB V2 二进制格式（与 C++ 侧约定，小端）
+
+| 偏移 | 长度 | 字段 |
+|---|---|---|
+| 0x0000 | 4 | MAGIC `"LICB"` |
+| 0x0004 | 2 | VERSION = `2` (uint16) |
+| 0x0006 | 4 | PAYLOAD_LENGTH = N (uint32) |
+| 0x000A | 4 | SIG_LENGTH = 256 (uint32) |
+| 0x000E | N | payload = `canonical_json(...)` 原始字节 |
+| 0x000E+N | 256 | RSA-2048 PKCS#1 v1.5 + SHA-256 原始签名 |
+
+payload JSON 字段：`v`(=2) / `mid` / `card` / `iat` / `eat` / `perm` / `thr`(=50) / `bl`。
+payload 内不允许出现数组（C++ `mini_json` 不支持）。客户端拿到文件后**只验签、
+不重序列化**，因此签发侧的 canonical 序列化必须与
+[verify_license.py](client/verify_license.py) 的 `canonical_json`
+（key 排序 + 紧凑分隔符 + UTF-8）逐字节一致。
+
+> `verify_license.py` 的 `canonical_json` 是唯一序列化真相，签发侧
+> `sign_license.py` 直接 import，**两边不允许各写一份**。
+
+### 本地造证（跨项目闭环测试）
+
+```bash
+python -m issuer.sign_license \
+    --private-key ../compressed\ migration/src/test/keys/test_only_private_1.pem \
+    --payload-file payload.json \
+    --out out.lic
+
+# 用 C++ 侧验签（上一阶段产出的测试程序）
+../compressed\ migration/src/test/test_licb_rsa.exe --verify out.lic \
+    ../compressed\ migration/src/test/keys/test_only_public_1.der
+# → STATUS=OK ... SCORE=100 PASS=1 RESULT=PASS
+```
+

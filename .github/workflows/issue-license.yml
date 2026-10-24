@@ -2,11 +2,16 @@ name: Issue License
 
 # ── 触发：客户端 POST repository_dispatch 上来 ──────────────────────────────
 # client_payload 字段（见 client/trigger_and_fetch.py）：
-#   hw_fp       : 客户端采集的硬件指纹（原始，仅用于签名，不落盘到 .lic）
-#   key         : sha256(hw_fp)[:16].hex() —— 作为 .lic 文件名
-#   customer_id : 订单号 / 用户名（签名前哈希脱敏）
-#   tier        : "pro" / "basic" / "trial"
-#   auth        : HMAC-SHA256(secret, "hw_fp|key|customer_id|tier") 轻量防刷
+#   mid                : 机器码（64 位小写 HEX，SHA-256）
+#   card_type          : "permanent" / "day" / "minute" / "bypass"
+#   remaining_days     : 天卡剩余天数（card_type=day 时必填正整数）
+#   remaining_minutes  : 剩余总分钟（card_type=minute 时必填正整数）
+#   hw_snapshot        : 5 项硬件快照 {disk,board,mac,cpu,uuid}，缺失为 "NAN"
+#   card_id            : sha256(卡密)[:16] —— 写入 payload 的 card 字段（不暴露卡密）
+#   key                : sha256(mid)[:16] —— 作为 .lic 文件名
+#   customer_id        : 订单号 / 用户名（仅记录，不进 V2 payload）
+#   tier               : "pro" / "basic" / "trial"（仅记录）
+#   auth               : HMAC-SHA256(secret, canonical_json(除 auth 外全部字段)) 轻量防刷
 #
 # run-name 携带 key：客户端轮询 run 列表时按 display_title 精确匹配，
 # 避免时间窗口串号。
@@ -34,7 +39,12 @@ jobs:
     # run: 脚本里只允许出现 "$CP_*" 双引号环境变量，禁止直接插值
     # ${{ github.event.client_payload.* }}，防止命令注入 / 私钥泄露。
     env:
-      CP_HW_FP: ${{ github.event.client_payload.hw_fp }}
+      CP_MID: ${{ github.event.client_payload.mid }}
+      CP_CARD_TYPE: ${{ github.event.client_payload.card_type }}
+      CP_REMAINING_DAYS: ${{ github.event.client_payload.remaining_days }}
+      CP_REMAINING_MINUTES: ${{ github.event.client_payload.remaining_minutes }}
+      CP_HW_SNAPSHOT: ${{ toJson(github.event.client_payload.hw_snapshot) }}
+      CP_CARD_ID: ${{ github.event.client_payload.card_id }}
       CP_KEY: ${{ github.event.client_payload.key }}
       CP_CUSTOMER: ${{ github.event.client_payload.customer_id }}
       CP_TIER: ${{ github.event.client_payload.tier }}
@@ -64,12 +74,22 @@ jobs:
           LICENSE_OUT_DIR: ${{ runner.temp }}
         run: |
           set -e
-          echo "--- GHA license issuance ---"
-          echo "key (file)  : $CP_KEY"
-          echo "tier        : $CP_TIER"
-          echo "customer_id : (will be hashed before signing)"
-          echo "hw_fp       : (will be hashed before signing)"
-          echo "----------------------------"
+          echo "--- GHA license issuance (LICB V2) ---"
+          echo "key (file)        : $CP_KEY"
+          echo "mid               : $CP_MID"
+          echo "card_id           : $CP_CARD_ID"
+          echo "card_type         : $CP_CARD_TYPE"
+          echo "remaining_days    : $CP_REMAINING_DAYS"
+          echo "remaining_minutes : $CP_REMAINING_MINUTES"
+          # hw_snapshot 含硬盘 SN / UUID / MAC，公开仓库的 Actions 日志可见，
+          # 因此只透传到 env，不打印。
+          echo "tier              : $CP_TIER"
+          echo "customer_id       : (not embedded in V2 payload)"
+          echo "--------------------------------------"
+
+          # sign_license.py 会打印 card_type 与 eat（含 eat-iat 秒数），
+          # 这里再显式回显一次，便于 GHA 日志排障。
+          echo "expect: card_type=$CP_CARD_TYPE -> eat computed from iat by signer"
 
           python issuer/sign_license.py
 
