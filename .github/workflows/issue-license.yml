@@ -96,8 +96,11 @@ jobs:
           ls -l "$RUNNER_TEMP"/*.lic
 
       # ── Step 3: Git push 到 license-result 分支 ──────────────────────────
-      # 安全修复 #2：checkout -f 强制切换；产物从 $RUNNER_TEMP 拷入。
-      # Retry 循环：fetch + rebase 吸收并发 push，3 次重试，间隔 5 秒。
+      # 防历史膨胀：每次签发都从孤儿分支重新开始，工作区只放本次的 .lic，
+      # commit 无父提交，git push -f 强制覆盖远端。
+      # 该分支永远只有 1 个 commit、1 个文件，历史旧证绝不残留。
+      # （并发按 key 分组串行；不同 key 同时签发时后者覆盖前者，
+      #   覆盖仅影响另一台机器的拉证时机，重试即可，属可接受代价。）
       - name: Commit and push to license-result branch
         run: |
           set -e
@@ -114,44 +117,19 @@ jobs:
             exit 1
           fi
 
-          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
-            echo "Branch ${BRANCH} exists — force checkout..."
-            git fetch origin "${BRANCH}"
-            git checkout -f "${BRANCH}"
-            git pull --rebase origin "${BRANCH}"
-          else
-            echo "Branch ${BRANCH} missing — creating orphan branch (lic files only)..."
-            git checkout --orphan "${BRANCH}"
-            git rm -rf . >/dev/null 2>&1 || true
-          fi
+          echo "Resetting ${BRANCH} to a fresh orphan commit with only ${FILE} ..."
 
-          for attempt in 1 2 3; do
-            echo "--- Push attempt ${attempt}/3 for ${FILE} ---"
+          # 脱离 main，开孤儿分支（名字随意，push 时映射到 license-result）
+          git checkout --orphan "issue-${CP_KEY}-$$"
+          git rm -rf . >/dev/null 2>&1 || true
 
-            cp "${SRC}" "${FILE}"
-            git add "${FILE}"
+          cp "${SRC}" "${FILE}"
+          git add "${FILE}"
+          git commit -m "license: issue for ${CP_KEY} @ $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-            # --allow-empty: same content re-activation still produces a fresh
-            # nonce/signature, but keep the loop alive even if identical.
-            git commit -m "license: issue for ${CP_KEY} @ $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                       --allow-empty || true
-
-            if git push origin "${BRANCH}"; then
-              echo "Push succeeded on attempt ${attempt}"
-              exit 0
-            fi
-
-            echo "Push failed on attempt ${attempt} (concurrent push?). fetch + rebase, sleep 5s..."
-            git fetch origin "${BRANCH}"
-            if ! git rebase "origin/${BRANCH}"; then
-              git rebase --abort || true
-              git reset --hard "origin/${BRANCH}"
-            fi
-            sleep 5
-          done
-
-          echo "All 3 push attempts failed. Aborting."
-          exit 1
+          # 强制覆盖：分支历史被替换为这唯一一个 commit
+          git push -f origin "HEAD:refs/heads/${BRANCH}"
+          echo "Force-pushed single-commit branch ${BRANCH} (file: ${FILE})"
 
       # ── Step 4: Print download URL ────────────────────────────────────────
       # 安全修复 #6：使用 github.repository（owner/repo 一体），
