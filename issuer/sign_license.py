@@ -316,7 +316,6 @@ def sign_from_env() -> Path:
     _verify_hmac_auth(cp)
 
     key = _require_str(cp, "key")
-    nonce = _require_str(cp, "nonce")   # 仅用于唯一化文件名，绝不进入签名数据
 
     private_key = _load_private_key_from_string(pem_text)
     payload = build_v2_payload(cp)
@@ -326,14 +325,13 @@ def sign_from_env() -> Path:
     # 避免 checkout -f 被同名文件阻塞。
     out_dir = Path(os.environ.get("LICENSE_OUT_DIR", "."))
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{key}_{nonce}.lic"
+    out_path = out_dir / f"{key}.lic"
     out_path.write_bytes(lic_bytes)        # raw LICB V2, no JSON envelope
 
     print(f"Signed license written to {out_path}")
     print(f"  v            = {payload['v']}")
     print(f"  mid          = {payload['mid']}")
     print(f"  card         = {payload['card']}")
-    print(f"  nonce        = {nonce}")
     print(f"  card_type    = {cp.get('card_type')}")
     print(f"  perm         = {payload['perm']}")
     print(f"  iat          = {payload['iat']}")
