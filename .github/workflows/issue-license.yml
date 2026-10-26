@@ -1,12 +1,33 @@
 name: Issue License
 
+# ── 触发：客户端 POST repository_dispatch 上来 ──────────────────────────────
+# client_payload 字段（见 client/trigger_and_fetch.py）：
+#   mid                : 机器码（64 位小写 HEX，SHA-256）
+#   card_type          : "permanent" / "day" / "minute" / "bypass"
+#   remaining_days     : 天卡剩余天数（card_type=day 时必填正整数）
+#   remaining_minutes  : 剩余总分钟（card_type=minute 时必填正整数）
+#   hw_snapshot        : 5 项硬件快照 {disk,board,mac,cpu,uuid}，缺失为 "NAN"
+#   card_id            : sha256(卡密)[:16] —— 写入 payload 的 card 字段（不暴露卡密）
+#   key                : sha256(mid)[:16] —— 作为 .lic 文件名前缀
+#   nonce              : 每次激活随机 16 位 hex —— 拼入文件名 <key>_<nonce>.lic（击穿 CDN 缓存）
+#   customer_id        : 订单号 / 用户名（仅记录，不进 V2 payload）
+#   tier               : "pro" / "basic" / "trial"（仅记录）
+#   auth               : HMAC-SHA256(secret, canonical_json(除 auth 外全部字段)) 轻量防刷
+#
+# run-name 携带 key：客户端轮询 run 列表时按 display_title 精确匹配，
+# 避免时间窗口串号。
+run-name: issue-license ${{ github.event.client_payload.key }}
+
 on:
   repository_dispatch:
     types: [issue-license]
 
+# ── 权限：仅需要 contents: write 来 push 到 license-result 分支 ────────────
+# 这里用的是 GITHUB_TOKEN（Action 内置临时 token），不是用户的 PAT。
 permissions:
   contents: write
 
+# ── 并发控制：同一个 key 的签名请求排队，不同 key 并行 ──────────────────────
 concurrency:
   group: license-issue-${{ github.event.client_payload.key }}
   cancel-in-progress: false
@@ -14,6 +35,10 @@ concurrency:
 jobs:
   sign-and-push:
     runs-on: ubuntu-latest
+
+    # ── 安全修复 #1：所有 client_payload 字段统一在 env 声明 ────────────────
+    # run: 脚本里只允许出现 "$CP_*" 双引号环境变量，禁止直接插值
+    # ${{ github.event.client_payload.* }}，防止命令注入 / 私钥泄露。
     env:
       CP_MID: ${{ github.event.client_payload.mid }}
       CP_CARD_TYPE: ${{ github.event.client_payload.card_type }}
@@ -27,6 +52,7 @@ jobs:
       CP_TIER: ${{ github.event.client_payload.tier }}
 
     steps:
+      # ── Step 1: 拉代码（issuer/sign_license.py 需要 import client/verify_license.py）
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -38,6 +64,10 @@ jobs:
       - name: Install dependencies
         run: pip install --no-cache-dir cryptography
 
+      # ── Step 2: 签名 ──────────────────────────────────────────────────────
+      # RSA_PRIVATE_KEY / DEMO_HMAC_SECRET 从仓库 Secrets 注入。
+      # 产物写到 $RUNNER_TEMP（LICENSE_OUT_DIR），不污染 git 工作区，
+      # 避免 checkout -f 时被本地同名文件阻塞。
       - name: Sign license
         env:
           RSA_PRIVATE_KEY: ${{ secrets.RSA_PRIVATE_KEY }}
@@ -46,27 +76,74 @@ jobs:
           LICENSE_OUT_DIR: ${{ runner.temp }}
         run: |
           set -e
-          echo "key   : $CP_KEY"
-          echo "nonce : $CP_NONCE"
+          echo "--- GHA license issuance (LICB V2) ---"
+          echo "key (file)        : $CP_KEY"
+          echo "nonce             : $CP_NONCE"
+          echo "mid               : $CP_MID"
+          echo "card_id           : $CP_CARD_ID"
+          echo "card_type         : $CP_CARD_TYPE"
+          echo "remaining_days    : $CP_REMAINING_DAYS"
+          echo "remaining_minutes : $CP_REMAINING_MINUTES"
+          # hw_snapshot 含硬盘 SN / UUID / MAC，公开仓库的 Actions 日志可见，
+          # 因此只透传到 env，不打印。
+          echo "tier              : $CP_TIER"
+          echo "customer_id       : (not embedded in V2 payload)"
+          echo "--------------------------------------"
+
+          # sign_license.py 会打印 card_type 与 eat（含 eat-iat 秒数），
+          # 这里再显式回显一次，便于 GHA 日志排障。
+          echo "expect: card_type=$CP_CARD_TYPE -> eat computed from iat by signer"
+
           python issuer/sign_license.py
+
           ls -l "$RUNNER_TEMP"/*.lic
 
+      # ── Step 3: Git push 到 license-result 分支 ──────────────────────────
+      # 防历史膨胀：每次签发都从孤儿分支重新开始，工作区只放本次的 .lic，
+      # commit 无父提交，git push -f 强制覆盖远端。
+      # 该分支永远只有 1 个 commit、1 个文件，历史旧证绝不残留。
+      # （并发按 key 分组串行；不同 key 同时签发时后者覆盖前者，
+      #   覆盖仅影响另一台机器的拉证时机，重试即可，属可接受代价。）
       - name: Commit and push to license-result branch
         run: |
           set -e
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           BRANCH="license-result"
           FILE="${CP_KEY}_${CP_NONCE}.lic"
           SRC="${RUNNER_TEMP}/${FILE}"
-          
+
+          if [ ! -f "$SRC" ]; then
+            echo "FATAL: signed file $SRC not found (sign step failed?)"
+            exit 1
+          fi
+
+          echo "Resetting ${BRANCH} to a fresh orphan commit with only ${FILE} ..."
+
+          # 脱离 main，开孤儿分支（名字随意，push 时映射到 license-result）
           git checkout --orphan "issue-${CP_KEY}-$$"
           git rm -rf . >/dev/null 2>&1 || true
+
           cp "${SRC}" "${FILE}"
           git add "${FILE}"
-          git commit -m "license: issue for ${CP_KEY}"
-          git push -f origin "HEAD:refs/heads/${BRANCH}"
+          git commit -m "license: issue for ${CP_KEY} @ $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+          # 强制覆盖：分支历史被替换为这唯一一个 commit
+          git push -f origin "HEAD:refs/heads/${BRANCH}"
+          echo "Force-pushed single-commit branch ${BRANCH} (file: ${FILE})"
+
+      # ── Step 4: Print download URL ────────────────────────────────────────
+      # 安全修复 #6：使用 github.repository（owner/repo 一体），
+      # github.repository.owner.name 是无效上下文。
       - name: Print download URL
         run: |
+          echo "License file will be available at:"
           echo "https://raw.githubusercontent.com/${{ github.repository }}/license-result/${CP_KEY}_${CP_NONCE}.lic"
+          echo "(add ?t=<epoch> to bust CDN cache when polling)"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Workflow finished for key=${CP_KEY}"
