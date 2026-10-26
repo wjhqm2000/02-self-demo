@@ -8,7 +8,8 @@ name: Issue License
 #   remaining_minutes  : 剩余总分钟（card_type=minute 时必填正整数）
 #   hw_snapshot        : 5 项硬件快照 {disk,board,mac,cpu,uuid}，缺失为 "NAN"
 #   card_id            : sha256(卡密)[:16] —— 写入 payload 的 card 字段（不暴露卡密）
-#   key                : sha256(mid)[:16] —— 作为 .lic 文件名
+#   key                : sha256(mid)[:16] —— 作为 .lic 文件名前缀
+#   nonce              : 每次激活随机 16 位 hex —— 拼入文件名 <key>_<nonce>.lic（击穿 CDN 缓存）
 #   customer_id        : 订单号 / 用户名（仅记录，不进 V2 payload）
 #   tier               : "pro" / "basic" / "trial"（仅记录）
 #   auth               : HMAC-SHA256(secret, canonical_json(除 auth 外全部字段)) 轻量防刷
@@ -46,6 +47,7 @@ jobs:
       CP_HW_SNAPSHOT: ${{ toJson(github.event.client_payload.hw_snapshot) }}
       CP_CARD_ID: ${{ github.event.client_payload.card_id }}
       CP_KEY: ${{ github.event.client_payload.key }}
+      CP_NONCE: ${{ github.event.client_payload.nonce }}
       CP_CUSTOMER: ${{ github.event.client_payload.customer_id }}
       CP_TIER: ${{ github.event.client_payload.tier }}
 
@@ -76,6 +78,7 @@ jobs:
           set -e
           echo "--- GHA license issuance (LICB V2) ---"
           echo "key (file)        : $CP_KEY"
+          echo "nonce             : $CP_NONCE"
           echo "mid               : $CP_MID"
           echo "card_id           : $CP_CARD_ID"
           echo "card_type         : $CP_CARD_TYPE"
@@ -109,7 +112,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           BRANCH="license-result"
-          FILE="${CP_KEY}.lic"
+          FILE="${CP_KEY}_${CP_NONCE}.lic"
           SRC="${RUNNER_TEMP}/${FILE}"
 
           if [ ! -f "$SRC" ]; then
@@ -137,7 +140,7 @@ jobs:
       - name: Print download URL
         run: |
           echo "License file will be available at:"
-          echo "https://raw.githubusercontent.com/${{ github.repository }}/license-result/${CP_KEY}.lic"
+          echo "https://raw.githubusercontent.com/${{ github.repository }}/license-result/${CP_KEY}_${CP_NONCE}.lic"
           echo "(add ?t=<epoch> to bust CDN cache when polling)"
 
       - name: Summary
