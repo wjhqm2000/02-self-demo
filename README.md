@@ -281,7 +281,7 @@ pip install cryptography requests
 | 组件 | 来源项目 |
 |------|---------|
 | canonical_json + RSA 签名/验签 | [Arnas-Verify](https://github.com/) + compressed migration |
-| LICB V2 二进制容器 + PKCS#1 v1.5 验签 | compressed migration（DELIVERABLE §15） |
+| LICB V2 二进制容器 + PKCS#1 v1.5 验签 | compressed migration |
 | 验证顺序（加密优先） | Arnas-Verify + licensing-1.0.0 token-format §7 |
 | mid / bl 硬件绑定 + 硬件评分 | compressed migration（fingerprint / license_score） |
 | `eat=0 + perm=true` 永久表示 | compressed migration（LICB payload 字段表） |
