@@ -9,8 +9,8 @@ name: Issue License
 #   hw_snapshot        : 5 项硬件快照 {disk,board,mac,cpu,uuid}，缺失为 "NAN"
 #   card_id            : sha256(卡密)[:16] —— 写入 payload 的 card 字段（不暴露卡密）
 #   key                : sha256(mid)[:16] + "_" + nonce —— 作为 .lic 文件名（nonce 拼入 key 击穿 CDN 缓存）
-#   customer_id        : 订单号 / 用户名（仅记录，不进 V2 payload）
-#   tier               : "pro" / "basic" / "trial"（仅记录）
+#   kami_ticket        : 卡密通验卡原始响应（正文字段，原样透传，云端 KAMI_SIGN_KEY 验签）
+#   kami_sign2         : 卡密通 X-Sign2 响应头（无则空串）
 #   auth               : HMAC-SHA256(secret, canonical_json(除 auth 外全部字段)) 轻量防刷
 #
 # run-name 携带 key：客户端轮询 run 列表时按 display_title 精确匹配，
@@ -46,8 +46,8 @@ jobs:
       CP_HW_SNAPSHOT: ${{ toJson(github.event.client_payload.hw_snapshot) }}
       CP_CARD_ID: ${{ github.event.client_payload.card_id }}
       CP_KEY: ${{ github.event.client_payload.key }}
-      CP_CUSTOMER: ${{ github.event.client_payload.customer_id }}
-      CP_TIER: ${{ github.event.client_payload.tier }}
+      CP_KAMI_TICKET: ${{ github.event.client_payload.kami_ticket }}
+      CP_KAMI_SIGN2: ${{ github.event.client_payload.kami_sign2 }}
 
     steps:
       # ── Step 1: 拉代码（issuer/sign_license.py 需要 import client/verify_license.py）
@@ -70,6 +70,7 @@ jobs:
         env:
           RSA_PRIVATE_KEY: ${{ secrets.RSA_PRIVATE_KEY }}
           DEMO_HMAC_SECRET: ${{ secrets.DEMO_HMAC_SECRET }}
+          KAMI_SIGN_KEY: ${{ secrets.KAMI_SIGN_KEY }}
           CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
           LICENSE_OUT_DIR: ${{ runner.temp }}
         run: |
@@ -83,8 +84,8 @@ jobs:
           echo "remaining_minutes : $CP_REMAINING_MINUTES"
           # hw_snapshot 含硬盘 SN / UUID / MAC，公开仓库的 Actions 日志可见，
           # 因此只透传到 env，不打印。
-          echo "tier              : $CP_TIER"
-          echo "customer_id       : (not embedded in V2 payload)"
+          [ -n "$CP_KAMI_TICKET" ] && echo "kami_ticket_set   : yes" || echo "kami_ticket_set   : no"
+          [ -n "$CP_KAMI_SIGN2" ] && echo "kami_sign2_set    : yes" || echo "kami_sign2_set    : no"
           echo "--------------------------------------"
 
           # sign_license.py 会打印 card_type 与 eat（含 eat-iat 秒数），
