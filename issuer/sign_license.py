@@ -294,6 +294,90 @@ def _verify_hmac_auth(cp: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 卡密通票据验签（移植自 cloudflare_worker/index.js verifyKamiTicket，去 KV 段）
+# ---------------------------------------------------------------------------
+
+_KAMI_TS_TOLERANCE_SEC = 120
+_ASCII_DIGITS = re.compile(r"[0-9]+")
+
+
+def _is_all_digits(s: str) -> bool:
+    """严格 ASCII 数字判定（对齐 JS /^\\d+$/；禁用 str.isdigit 的 Unicode 坑）。"""
+    return bool(_ASCII_DIGITS.fullmatch(s))
+
+
+def parse_kami_biz(biz: str) -> Dict[str, Any]:
+    """解析卡密通业务体 → 卡型/剩余（与 CF parseKamiBiz 分支顺序严格一致）。
+
+    返回 {"card_type","permanent","remaining_days","remaining_minutes"}。
+    """
+    if "bypass" in biz:
+        return {"card_type": "bypass", "permanent": True,
+                "remaining_days": 0, "remaining_minutes": -1}
+    parts = biz.split("|")
+    if (len(parts) >= 2 and parts[1] == "permanent") or \
+       (len(parts) >= 3 and parts[2] == "permanent"):
+        return {"card_type": "permanent", "permanent": True,
+                "remaining_days": 0, "remaining_minutes": -1}
+    if len(parts) >= 4 and _is_all_digits(parts[3]):
+        mins = int(parts[3])
+        return {"card_type": "minute", "permanent": False,
+                "remaining_days": mins // 1440, "remaining_minutes": mins}
+    if len(parts) >= 2 and _is_all_digits(parts[1]):
+        days = int(parts[1])
+        return {"card_type": "day", "permanent": False,
+                "remaining_days": days, "remaining_minutes": days * 1440}
+    raise LicenseRejected("票据卡型无法解析")
+
+
+def verify_kami_ticket(ticket: Any, x_sign2: Any) -> Dict[str, Any]:
+    """验签卡密通票据（MD5 + 120s 时间窗），返回 parse_kami_biz 结果。
+
+    与 CF verifyKamiTicket 对齐（不含 mid 比对与 KV 核销）；ticket/x_sign2 原样使用，
+    不做 strip 或重拼。
+    """
+    sign_key = os.environ.get("KAMI_SIGN_KEY")
+    if not sign_key:
+        raise RuntimeError("env KAMI_SIGN_KEY not set — required for kami ticket verification")
+
+    if not isinstance(ticket, str) or not ticket.strip():
+        raise LicenseRejected("kami_ticket 缺失")
+
+    # 1. 拆 body_with_ts 与签名（严格原样）
+    sign_in_body = ""
+    sign_pos = ticket.find("|sign=")
+    if sign_pos != -1:
+        body_with_ts = ticket[:sign_pos]
+        sign_in_body = ticket[sign_pos + 6:]
+    else:
+        body_with_ts = ticket
+
+    server_sign = (x_sign2 if isinstance(x_sign2, str) else "").strip()
+    if not server_sign:
+        server_sign = sign_in_body.strip()
+    if not server_sign:
+        raise LicenseRejected("票据缺少签名")
+
+    # 2. 验签（大小写不敏感）
+    if hashlib.md5((body_with_ts + sign_key).encode("utf-8")).hexdigest() != server_sign.lower():
+        raise LicenseRejected("票据签名校验失败")
+
+    # 3. 时间戳（body_with_ts 末尾 "|Unix秒"）
+    last_pipe = body_with_ts.rfind("|")
+    if last_pipe < 0:
+        raise LicenseRejected("票据格式错误")
+    ts_str = body_with_ts[last_pipe + 1:]
+    if not _is_all_digits(ts_str):
+        raise LicenseRejected("票据时间戳非法")
+    server_ts = int(ts_str)
+    if abs(int(time.time()) - server_ts) > _KAMI_TS_TOLERANCE_SEC:
+        raise LicenseRejected("票据时间戳超出容差(120s)")
+
+    biz = body_with_ts[:last_pipe]
+    return parse_kami_biz(biz)
+
+
+# ---------------------------------------------------------------------------
 # Top-level: read env vars, sign, write file
 # ---------------------------------------------------------------------------
 
@@ -314,6 +398,12 @@ def sign_from_env() -> Path:
 
     # 防刷校验在加载私钥之前：无授权请求直接死在门口
     _verify_hmac_auth(cp)
+
+    # 卡密通票据正向确权：以票据解析结果无条件覆盖客户端自报字段（剥离客户端声明权）
+    kami = verify_kami_ticket(cp.get("kami_ticket"), cp.get("kami_sign2"))
+    cp["card_type"]         = kami["card_type"]
+    cp["remaining_days"]    = kami["remaining_days"]
+    cp["remaining_minutes"] = kami["remaining_minutes"]
 
     key = _require_str(cp, "key")
 
