@@ -182,7 +182,20 @@ def build_v2_payload(
     if not 6 <= len(card) <= 128:
         raise LicenseRejected(f"card_id 长度非法（应为卡密脱敏哈希），实际: {card!r}")
 
-    bl = _validate_snapshot(cp.get("hw_snapshot"))
+    hw_raw = cp.get("hw_snapshot")
+
+    # 防死证：先对“原始”快照做退化环境拦截（空/NAN 都算不可用），必须放在 _validate_snapshot 之前，
+    # 否则空串会被 _validate_snapshot 以“非空字符串”文案拦截，报不出“退化环境”的明确原因。
+    if isinstance(hw_raw, dict):
+        _identity_unavailable = 0
+        for _k in ("disk", "uuid", "mac"):
+            _v = hw_raw.get(_k, "")
+            if not isinstance(_v, str) or not _v.strip() or _v.strip().upper() == "NAN":
+                _identity_unavailable += 1
+        if _identity_unavailable >= 2:
+            raise LicenseRejected("该机器硬件特征采集不足（退化环境），拒绝签发证书")
+
+    bl = _validate_snapshot(hw_raw)
 
     # thr 由签发侧固定：客户端不得调低阈值，否则可弱化硬件绑定。
     provided_thr = cp.get("thr")
